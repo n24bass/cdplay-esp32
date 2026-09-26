@@ -17,18 +17,25 @@ static constexpr int I2S_LRCLK_PIN = 6;
 static constexpr int I2S_MCLK_PIN = 7;
 static constexpr int OLED_SDA_PIN = 8;
 static constexpr int OLED_SCL_PIN = 9;
-static constexpr int BUTTON_UP_PIN = 10;
-static constexpr int BUTTON_DOWN_PIN = 11;
-static constexpr int BUTTON_ACTION_PIN = 12;
-static constexpr int BUTTON_MODE_PIN = 13;
+// Seven independent digital button inputs. GPIO4-7 are reserved for I2S.
+static constexpr int BUTTON_PREV_PIN = 10;
+static constexpr int BUTTON_PLAY_PIN = 11;
+static constexpr int BUTTON_NEXT_PIN = 12;
+static constexpr int BUTTON_SEEK_BACK_PIN = 13;
+static constexpr int BUTTON_STOP_PIN = 14;
+static constexpr int BUTTON_SEEK_FORWARD_PIN = 15;
+static constexpr int BUTTON_MENU_PIN = 16;
 static constexpr size_t CDDA_SECTOR_BYTES = 2352;
 // About 533 ms of protection against seek/retry delays caused by vibration.
 static constexpr size_t AUDIO_PREBUFFER_SECTORS = 40;
 static constexpr size_t AUDIO_BUFFER_SECTORS = 48;
 
 static I2SClass i2s;
-static U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(
-    U8G2_R0, U8X8_PIN_NONE, OLED_SCL_PIN, OLED_SDA_PIN);
+#if 1
+static U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, OLED_SCL_PIN, OLED_SDA_PIN);
+#else
+static U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE, OLED_SCL_PIN, OLED_SDA_PIN);
+#endif
 static StreamBufferHandle_t audioBuffer = nullptr;
 static TaskHandle_t audioTaskHandle = nullptr;
 static volatile uint32_t audioBytesWritten = 0;
@@ -38,8 +45,6 @@ static volatile bool playbackFinished = false;
 static volatile bool readCdFinished = false;
 static volatile bool playbackAbort = false;
 static volatile bool userStopRequested = false;
-static volatile uint8_t volumePercent = 10;
-static volatile bool volumeMuted = false;
 static volatile bool readPausedWaiting = false;
 static volatile bool pauseKeepAlive = false;
 static bool stoppedMediaPoll = false;
@@ -128,7 +133,7 @@ static uint32_t readCdHash = 2166136261UL;
 static uint32_t concealedSectorCount = 0;
 static uint8_t silenceSector[CDDA_SECTOR_BYTES] = {};
 
-enum class UiMode : uint8_t { Track, Volume, PlayMode, Cddb };
+enum class UiMode : uint8_t { Track, PlayMode, Cddb };
 static UiMode uiMode = UiMode::Track;
 
 enum class RepeatMode : uint8_t { Off, All, One };
@@ -245,16 +250,6 @@ static void audioOutputTask(void *) {
         // instead of a stopped/underrunning I2S stream that sounds like noise.
         ++audioUnderrunChunks;
       }
-      const int32_t gainQ15 =
-          volumeMuted ? 0 : volumePercent * 32768L / 100;
-      for (size_t i = 0; i + 1 < received; i += 2) {
-        const int16_t sample =
-            (int16_t)(((uint16_t)chunk[i + 1] << 8) | chunk[i]);
-        const int16_t scaled =
-            (int16_t)(((int32_t)sample * gainQ15) >> 15);
-        chunk[i] = (uint16_t)scaled & 0xFF;
-        chunk[i + 1] = ((uint16_t)scaled >> 8) & 0xFF;
-      }
       const size_t written = i2s.write(chunk, sizeof(chunk));
       audioBytesWritten += received;
       if (written != sizeof(chunk)) {
@@ -344,8 +339,7 @@ static bool startI2sAudio() {
     audioBuffer = nullptr;
     return false;
   }
-  Serial.printf("I2S ready: SDIN=4 BCLK=5 LRCLK=6 MCLK=7, volume=%u%%.\n",
-                volumePercent);
+  Serial.println("I2S ready: SDIN=4 BCLK=5 LRCLK=6 MCLK=7, digital volume control disabled (100%).");
   return true;
 }
 
@@ -1533,27 +1527,45 @@ struct UiButton {
   bool longUsed;
 };
 
-// Explicit prototype prevents Arduino's auto-prototype generator from placing
-// this declaration before the UiButton type definition.
 static void updateButton(UiButton &button);
 
+// Physical layout:
+//   PREV   PLAY   NEXT
+//   SEEK-  STOP   SEEK+
+//                    MENU
 static UiButton uiButtons[] = {
-    {BUTTON_UP_PIN, true, true, 0, 0, 0, false, false, false, false},
-    {BUTTON_DOWN_PIN, true, true, 0, 0, 0, false, false, false, false},
-    {BUTTON_ACTION_PIN, true, true, 0, 0, 0, false, false, false, false},
-    {BUTTON_MODE_PIN, true, true, 0, 0, 0, false, false, false, false},
+    {BUTTON_PREV_PIN, true, true, 0, 0, 0, false, false, false, false},
+    {BUTTON_PLAY_PIN, true, true, 0, 0, 0, false, false, false, false},
+    {BUTTON_NEXT_PIN, true, true, 0, 0, 0, false, false, false, false},
+    {BUTTON_SEEK_BACK_PIN, true, true, 0, 0, 0, false, false, false, false},
+    {BUTTON_STOP_PIN, true, true, 0, 0, 0, false, false, false, false},
+    {BUTTON_SEEK_FORWARD_PIN, true, true, 0, 0, 0, false, false, false, false},
+    {BUTTON_MENU_PIN, true, true, 0, 0, 0, false, false, false, false},
+};
+
+enum ButtonIndex : uint8_t {
+  BI_PREV = 0,
+  BI_PLAY,
+  BI_NEXT,
+  BI_SEEK_BACK,
+  BI_STOP,
+  BI_SEEK_FORWARD,
+  BI_MENU,
 };
 
 static void updateButton(UiButton &button) {
   button.pressEvent = false;
   button.releaseEvent = false;
   button.repeatEvent = false;
+
   const bool raw = digitalRead(button.pin);
   const uint32_t now = millis();
+
   if (raw != button.raw) {
     button.raw = raw;
     button.changedAt = now;
   }
+
   if (raw != button.stable && now - button.changedAt >= 30) {
     button.stable = raw;
     if (!raw) {
@@ -1565,6 +1577,8 @@ static void updateButton(UiButton &button) {
       button.releaseEvent = true;
     }
   }
+
+  // Only SEEK-/SEEK+ repeat while held. Other buttons remain one-shot.
   if (!button.stable && now - button.pressedAt >= 600 &&
       now - button.repeatedAt >= 250) {
     button.repeatedAt = now;
@@ -1654,9 +1668,6 @@ static void applyPlayModeWithoutSeeking() {
           : discLeadOutLba;
   playbackSectorTarget = desiredEndLba - playbackStartLba;
 
-  // If a previous single-track mode already stopped the reader while its
-  // buffered audio is still draining, extending the boundary can resume from
-  // the following sector without resetting audible position or the buffer.
   if (!stopAtTrackEnd && readCdFinished && botPhase == BotPhase::Idle &&
       readCdLba + 1 < desiredEndLba) {
     readCdFinished = false;
@@ -1705,29 +1716,38 @@ static void requestRelativeSeek(int32_t sectors) {
 
 static void handleUiButtons() {
   for (UiButton &button : uiButtons) updateButton(button);
-  UiButton &up = uiButtons[0];
-  UiButton &down = uiButtons[1];
-  UiButton &action = uiButtons[2];
-  UiButton &mode = uiButtons[3];
 
-  if (mode.pressEvent) {
-    if (uiMode == UiMode::Track) uiMode = UiMode::Volume;
-    else if (uiMode == UiMode::Volume) uiMode = UiMode::PlayMode;
-    else if (uiMode == UiMode::PlayMode) uiMode = UiMode::Cddb;
-    else {
+  UiButton &prev = uiButtons[BI_PREV];
+  UiButton &play = uiButtons[BI_PLAY];
+  UiButton &next = uiButtons[BI_NEXT];
+  UiButton &seekBack = uiButtons[BI_SEEK_BACK];
+  UiButton &stop = uiButtons[BI_STOP];
+  UiButton &seekForward = uiButtons[BI_SEEK_FORWARD];
+  UiButton &menu = uiButtons[BI_MENU];
+
+  // MENU toggles between the normal screen, playback options, and CDDB
+  // candidate selection. STOP always returns to the normal screen.
+  if (menu.pressEvent) {
+    if (uiMode == UiMode::Track) {
+      uiMode = UiMode::PlayMode;
+    } else if (uiMode == UiMode::PlayMode) {
+      uiMode = UiMode::Cddb;
+    } else {
       uiMode = UiMode::Track;
     }
   }
 
-  if (uiMode == UiMode::Track && action.repeatEvent &&
-      !userStopRequested) {
-    stopPlayback();
+  if (stop.pressEvent) {
+    if (uiMode != UiMode::Track) {
+      uiMode = UiMode::Track;
+    } else {
+      stopPlayback();
+    }
   }
 
   if (uiMode == UiMode::Track) {
-    if (up.repeatEvent) requestRelativeSeek(-5 * 75);
-    if (down.repeatEvent) requestRelativeSeek(5 * 75);
-    if (up.releaseEvent && !up.longUsed) {
+    // PREV/NEXT are dedicated track controls.
+    if (prev.releaseEvent && !prev.longUsed) {
       if (shuffleEnabled && shuffleOrderPosition > 0) {
         requestTrack(shuffleOrder[shuffleOrderPosition - 1]);
       } else if (shuffleEnabled && shuffleOrderCount > 0) {
@@ -1736,7 +1756,8 @@ static void handleUiButtons() {
         requestTrack(displayedTrackIndex > 0 ? displayedTrackIndex - 1 : 0);
       }
     }
-    if (down.releaseEvent && !down.longUsed) {
+
+    if (next.releaseEvent && !next.longUsed) {
       if (shuffleEnabled) {
         requestTrack(shuffleOrderPosition + 1 < shuffleOrderCount
                          ? shuffleOrder[shuffleOrderPosition + 1]
@@ -1747,7 +1768,15 @@ static void handleUiButtons() {
                          : 0);
       }
     }
-    if (action.releaseEvent && !action.longUsed) {
+
+    // SEEK-/SEEK+ perform 5-second relative seeks on a short press and
+    // repeat every 250 ms while held after the 600 ms long-press threshold.
+    if (seekBack.pressEvent) requestRelativeSeek(-5 * 75);
+    if (seekForward.pressEvent) requestRelativeSeek(5 * 75);
+    if (seekBack.repeatEvent) requestRelativeSeek(-5 * 75);
+    if (seekForward.repeatEvent) requestRelativeSeek(5 * 75);
+
+    if (play.releaseEvent && !play.longUsed) {
       if (playbackFinished || readCdFinished) {
         requestTrack(displayedTrackIndex);
         return;
@@ -1761,66 +1790,53 @@ static void handleUiButtons() {
         startScsiCommand(ScsiCommand::ReadCd);
       }
     }
-  } else {
-    if (uiMode == UiMode::Volume && (up.pressEvent || up.repeatEvent)) {
-      volumePercent = min(100, (int)volumePercent + 5);
-      volumeMuted = false;
-    }
-    if (uiMode == UiMode::Volume && (down.pressEvent || down.repeatEvent)) {
-      volumePercent = max(0, (int)volumePercent - 5);
-      volumeMuted = false;
-    }
-    if (uiMode == UiMode::Volume && action.releaseEvent && !action.longUsed) {
-      volumeMuted = !volumeMuted;
-    }
-    if (uiMode == UiMode::PlayMode) {
-      if (up.pressEvent) {
-        shuffleEnabled = !shuffleEnabled;
-        if (shuffleEnabled) {
-          buildShuffleOrder(displayedTrackIndex);
-        } else {
-          shuffleOrderCount = 0;
-          shuffleOrderPosition = 0;
-        }
-        applyPlayModeWithoutSeeking();
-      }
-      if (down.pressEvent) {
-        if (repeatMode == RepeatMode::Off) repeatMode = RepeatMode::All;
-        else if (repeatMode == RepeatMode::All) repeatMode = RepeatMode::One;
-        else repeatMode = RepeatMode::Off;
-        applyPlayModeWithoutSeeking();
-      }
-      if (action.releaseEvent && !action.longUsed) {
-        const bool modeWasActive =
-            shuffleEnabled || repeatMode != RepeatMode::Off;
-        shuffleEnabled = false;
-        repeatMode = RepeatMode::Off;
+  } else if (uiMode == UiMode::PlayMode) {
+    // PREV = shuffle, NEXT = repeat, PLAY = clear both.
+    if (prev.pressEvent) {
+      shuffleEnabled = !shuffleEnabled;
+      if (shuffleEnabled) {
+        buildShuffleOrder(displayedTrackIndex);
+      } else {
         shuffleOrderCount = 0;
         shuffleOrderPosition = 0;
-        if (modeWasActive) applyPlayModeWithoutSeeking();
       }
+      applyPlayModeWithoutSeeking();
     }
-    if (uiMode == UiMode::Cddb && cddbCandidatesReady &&
-        cddbCandidateCount > 0) {
-      if (up.pressEvent || up.repeatEvent) {
-        cddbCandidateSelection =
-            cddbCandidateSelection == 0
-                ? cddbCandidateCount - 1
-                : cddbCandidateSelection - 1;
-      }
-      if (down.pressEvent || down.repeatEvent) {
-        cddbCandidateSelection =
-            (cddbCandidateSelection + 1) % cddbCandidateCount;
-      }
-      if (action.releaseEvent && !action.longUsed) {
-        cddbReadCandidateRequested = cddbCandidateSelection;
-        cddbLookupRequested = true;
-        cddbStatus = CddbStatus::Reading;
-        Serial.printf("CDDB candidate %u selected: %s\n",
-                      cddbCandidateSelection + 1,
-                      cddbCandidates[cddbCandidateSelection].title.c_str());
-        uiMode = UiMode::Track;
-      }
+    if (next.pressEvent) {
+      if (repeatMode == RepeatMode::Off) repeatMode = RepeatMode::All;
+      else if (repeatMode == RepeatMode::All) repeatMode = RepeatMode::One;
+      else repeatMode = RepeatMode::Off;
+      applyPlayModeWithoutSeeking();
+    }
+    if (play.releaseEvent && !play.longUsed) {
+      const bool modeWasActive =
+          shuffleEnabled || repeatMode != RepeatMode::Off;
+      shuffleEnabled = false;
+      repeatMode = RepeatMode::Off;
+      shuffleOrderCount = 0;
+      shuffleOrderPosition = 0;
+      if (modeWasActive) applyPlayModeWithoutSeeking();
+    }
+  } else if (uiMode == UiMode::Cddb && cddbCandidatesReady &&
+             cddbCandidateCount > 0) {
+    if (prev.pressEvent) {
+      cddbCandidateSelection =
+          cddbCandidateSelection == 0
+              ? cddbCandidateCount - 1
+              : cddbCandidateSelection - 1;
+    }
+    if (next.pressEvent) {
+      cddbCandidateSelection =
+          (cddbCandidateSelection + 1) % cddbCandidateCount;
+    }
+    if (play.releaseEvent && !play.longUsed) {
+      cddbReadCandidateRequested = cddbCandidateSelection;
+      cddbLookupRequested = true;
+      cddbStatus = CddbStatus::Reading;
+      Serial.printf("CDDB candidate %u selected: %s\n",
+                    cddbCandidateSelection + 1,
+                    cddbCandidates[cddbCandidateSelection].title.c_str());
+      uiMode = UiMode::Track;
     }
   }
 }
@@ -2047,13 +2063,10 @@ static void drawUi() {
     }
     const int16_t x = max(0, (128 - (int)strlen(statusText) * 6) / 2);
     oled.drawStr(x, 28, statusText);
-    snprintf(line, sizeof(line), "VOL %s%u%%  MODE:%s",
-             volumeMuted ? "M" : "", volumePercent,
+    snprintf(line, sizeof(line), "LINE OUT MAX  MODE:%s",
              uiMode == UiMode::Track
                  ? "TRK"
-                 : (uiMode == UiMode::Volume
-                        ? "VOL"
-                        : (uiMode == UiMode::PlayMode ? "OPT" : "CDB")));
+                 : (uiMode == UiMode::PlayMode ? "OPT" : "CDB"));
     oled.drawStr(0, 62, line);
     if (WiFi.status() == WL_CONNECTED) drawWifiIcon(96, 0);
     if (cddbLookupRunning && ((millis() / 350) & 1) == 0) {
@@ -2084,10 +2097,9 @@ static void drawUi() {
     drawScrollingMetadata(metadata, 26, trackIndex);
     oled.setFont(u8g2_font_6x12_tf);
   }
-  snprintf(line, sizeof(line), "%02lu:%02lu       VOL %s%u",
+  snprintf(line, sizeof(line), "%02lu:%02lu       LINE MAX",
            (unsigned long)(elapsedSeconds / 60),
-           (unsigned long)(elapsedSeconds % 60), volumeMuted ? "M" : "",
-           volumePercent);
+           (unsigned long)(elapsedSeconds % 60));
   const uint8_t timeY = showMetadata ? 40 : 28;
   const uint8_t progressY = showMetadata ? 43 : 36;
   oled.drawStr(0, timeY, line);
@@ -2096,9 +2108,7 @@ static void drawUi() {
   snprintf(line, sizeof(line), "MODE:%s",
            uiMode == UiMode::Track
                ? "TRK"
-               : (uiMode == UiMode::Volume
-                      ? "VOL"
-                      : (uiMode == UiMode::PlayMode ? "OPT" : "CDB")));
+               : (uiMode == UiMode::PlayMode ? "OPT" : "CDB"));
   oled.drawStr(0, 62, line);
   if (shuffleEnabled) drawShuffleIcon(78, 50);
   if (repeatMode != RepeatMode::Off) {
@@ -2110,7 +2120,7 @@ static void drawUi() {
 void setup() {
   Serial.begin(115200);
   delay(1500);
-  Serial.println("\nESP32-S3 USB CD drive detection test");
+  Serial.println("\nESP32-S3 USB CD player - 7-button digital input version");
   randomSeed(esp_random());
   WiFi.onEvent(handleWifiEvent);
   WiFi.mode(WIFI_STA);
@@ -2118,6 +2128,8 @@ void setup() {
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   Wire.setClock(400000);
   oled.begin();
+  // All seven buttons are ordinary active-low digital inputs.
+  // Each switch connects its GPIO directly to GND when pressed.
   for (UiButton &button : uiButtons) {
     pinMode(button.pin, INPUT_PULLUP);
   }
