@@ -1,6 +1,6 @@
 # cdplay-esp32
 
-ESP32-S3にUSB接続のCD/DVD/BDドライブとI2S DACを接続し、音楽CDを再生するプロジェクトです。
+ESP32-S3にUSB接続のCD/DVD/BDドライブとI2S DACを接続し、音楽CDを再生するプロジェクトです。darekasan_net のオリジナルの UI を多少変更しています。
 
 USB Mass Storage Bulk-Only Transport（BOT）とSCSI/MMCコマンドをESP32-S3上で直接扱い、CD-DAの2352バイト生セクタを読み出してI2Sへ出力します。TOCは頭出しとトラック番号表示に使用し、通常再生はディスク全体を連続ストリームとして扱うため、曲間を途切れさせず再生できます。
 
